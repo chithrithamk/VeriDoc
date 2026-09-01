@@ -1,17 +1,19 @@
 """
-VeriDoc — FastAPI Backend Application Entrypoint (Phase 8)
+VeriDoc — FastAPI Backend Application Entrypoint (Phases 8 & 9)
 
 Provides REST endpoints for:
 1. Health & status inspection (/health)
-2. PDF Document ingestion & FAISS indexing (/documents/upload)
+2. PDF Document ingestion, FAISS indexing & SQLite persistence (/documents/upload)
 3. Question answering with grounded Gemini responses & citations (/questions/ask)
 """
 
+from contextlib import asynccontextmanager
 import os
 from pathlib import Path
 from typing import Optional
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 
 # Ensure .env is loaded if present
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -36,8 +38,12 @@ def _load_env_file() -> None:
 
 _load_env_file()
 
+from backend.database.session import engine, init_db
 from backend.models.schemas import HealthResponse
 from backend.services.rag_pipeline import RAGPipeline
+
+# Initialize SQLite database schema on startup
+init_db()
 
 # Global RAGPipeline singleton for FastAPI runtime
 _rag_pipeline_instance: Optional[RAGPipeline] = None
@@ -57,13 +63,21 @@ def set_rag_pipeline(pipeline: Optional[RAGPipeline]) -> None:
     _rag_pipeline_instance = pipeline
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan manager: runs startup initialization and cleanup."""
+    init_db()
+    yield
+
+
 # Initialize FastAPI application
 app = FastAPI(
     title="VeriDoc API",
-    description="AI Document Intelligence Platform — Grounded RAG Backend powered by FAISS and Google Gemini",
+    description="AI Document Intelligence Platform — Grounded RAG Backend powered by FAISS, SQLite, and Google Gemini",
     version="0.1.0",
     docs_url="/docs",
     redoc_url="/redoc",
+    lifespan=lifespan,
 )
 
 # Configure CORS
@@ -96,16 +110,26 @@ async def root():
     response_model=HealthResponse,
     tags=["system"],
     summary="Health check",
-    description="Returns the health status of the API and vector index readiness.",
+    description="Returns the health status of the API, vector index readiness, and database connection status.",
 )
 async def health():
     """Health check endpoint."""
     pipeline = get_rag_pipeline()
+
+    # Verify DB connectivity
+    db_status = "connected"
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+    except Exception:
+        db_status = "disconnected"
+
     return HealthResponse(
         status="healthy",
         service="VeriDoc API",
         version="0.1.0",
         is_document_indexed=pipeline.is_ready(),
+        database_status=db_status,
     )
 
 

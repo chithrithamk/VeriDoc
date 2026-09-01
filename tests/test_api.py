@@ -1,5 +1,5 @@
 """
-Integration and unit tests for FastAPI Backend endpoints (Phase 8).
+Integration and unit tests for FastAPI Backend endpoints (Phases 8 & 9).
 """
 
 import io
@@ -10,7 +10,11 @@ except ImportError:
     import fitz  # type: ignore
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
+from backend.database.session import Base, get_db
 from backend.main import app, set_rag_pipeline
 from backend.services.generator import (
     AnswerGenerator,
@@ -46,12 +50,34 @@ def mock_llm_client():
 
 @pytest.fixture
 def test_client(mock_llm_client):
-    """Create a clean TestClient with an isolated RAGPipeline instance."""
+    """Create a clean TestClient with an isolated in-memory DB and RAGPipeline instance."""
+    # In-memory SQLite database with StaticPool to share connection across threads
+    test_engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(bind=test_engine)
+    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
+
+    def override_get_db():
+        db = TestingSessionLocal()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    app.dependency_overrides[get_db] = override_get_db
+
     pipeline = RAGPipeline(api_key="mock-api-key", llm_client=mock_llm_client)
     set_rag_pipeline(pipeline)
+
     client = TestClient(app)
     yield client
+
     set_rag_pipeline(None)
+    app.dependency_overrides.clear()
+    Base.metadata.drop_all(bind=test_engine)
 
 
 # -----------------------------------------------------------------------------
@@ -68,20 +94,21 @@ def test_root_endpoint(test_client):
 
 
 def test_health_endpoint_initial_state(test_client):
-    """Test that GET /health reflects unindexed initial state."""
+    """Test that GET /health reflects unindexed initial state and connected DB."""
     response = test_client.get("/health")
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "healthy"
     assert data["is_document_indexed"] is False
+    assert data["database_status"] == "connected"
 
 
 # -----------------------------------------------------------------------------
-# Document Ingestion Endpoint Tests
+# Document Ingestion Endpoint Tests & Database Persistence
 # -----------------------------------------------------------------------------
 
-def test_upload_valid_pdf(test_client, sample_pdf_bytes):
-    """Test uploading a valid PDF document and indexing chunks."""
+def test_upload_valid_pdf_and_database_record(test_client, sample_pdf_bytes):
+    """Test uploading a valid PDF document, indexing chunks, and creating a database record."""
     files = {
         "file": ("test_doc.pdf", io.BytesIO(sample_pdf_bytes), "application/pdf")
     }
@@ -89,24 +116,54 @@ def test_upload_valid_pdf(test_client, sample_pdf_bytes):
     assert response.status_code == 201
     data = response.json()
     assert data["filename"] == "test_doc.pdf"
+    assert data["id"] is not None
     assert data["total_pages"] == 2
     assert data["total_chunks"] >= 2
     assert data["indexed_vectors"] >= 2
     assert data["status"] == "success"
+    assert data["created_at"] is not None
+
+    doc_id = data["id"]
 
     # Verify health endpoint now reflects that document is indexed
     health_res = test_client.get("/health")
     assert health_res.json()["is_document_indexed"] is True
 
+    # Retrieve document from database via GET /documents/{id}
+    get_res = test_client.get(f"/documents/{doc_id}")
+    assert get_res.status_code == 200
+    get_data = get_res.json()
+    assert get_data["id"] == doc_id
+    assert get_data["filename"] == "test_doc.pdf"
+    assert get_data["total_pages"] == 2
 
-def test_upload_invalid_file_extension(test_client):
-    """Test that uploading a non-PDF file returns 400 Bad Request."""
+    # List all documents via GET /documents
+    list_res = test_client.get("/documents/")
+    assert list_res.status_code == 200
+    list_data = list_res.json()
+    assert list_data["total"] == 1
+    assert list_data["documents"][0]["id"] == doc_id
+
+
+def test_upload_invalid_file_does_not_create_db_record(test_client):
+    """Test that uploading a non-PDF file returns 400 and creates no DB records."""
     files = {
         "file": ("notes.txt", io.BytesIO(b"Hello text content"), "text/plain")
     }
     response = test_client.post("/documents/upload", files=files)
     assert response.status_code == 400
     assert "Only .pdf files are supported" in response.json()["detail"]
+
+    # Verify DB remains empty
+    list_res = test_client.get("/documents/")
+    assert list_res.json()["total"] == 0
+
+
+def test_get_document_by_invalid_id_returns_404(test_client):
+    """Test GET /documents/{id} with non-existent ID returns 404."""
+    response = test_client.get("/documents/non-existent-uuid")
+    assert response.status_code == 404
+    assert "not found" in response.json()["detail"].lower()
 
 
 def test_upload_invalid_overlap_parameter(test_client, sample_pdf_bytes):
@@ -138,6 +195,7 @@ def test_get_document_stats(test_client, sample_pdf_bytes):
     assert data["is_ready"] is True
     assert data["total_pages"] == 2
     assert data["indexed_vectors"] >= 2
+    assert data["id"] is not None
 
 
 def test_clear_document(test_client, sample_pdf_bytes):
@@ -196,7 +254,7 @@ def test_ask_empty_question_returns_422_or_400(test_client, sample_pdf_bytes):
     }
     test_client.post("/documents/upload", files=files)
 
-    # Empty string (violates min_length=1 or custom validation)
+    # Empty string
     res1 = test_client.post("/questions/ask", json={"question": ""})
     assert res1.status_code in [400, 422]
 

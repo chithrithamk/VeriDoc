@@ -1,5 +1,5 @@
 """
-VeriDoc — Pydantic Schemas for API Request and Response Validation (Phase 8)
+VeriDoc — Pydantic Schemas for API Request and Response Validation (Phase 8 & 9)
 """
 
 from typing import Any, Dict, List, Optional
@@ -16,6 +16,7 @@ class HealthResponse(BaseModel):
     service: str = Field(default="VeriDoc API", description="Service name")
     version: str = Field(default="0.1.0", description="API version")
     is_document_indexed: bool = Field(default=False, description="Whether a document is currently indexed in the vector store")
+    database_status: str = Field(default="connected", description="Persistent database connection status")
 
 
 # -----------------------------------------------------------------------------
@@ -24,6 +25,7 @@ class HealthResponse(BaseModel):
 
 class DocumentUploadResponse(BaseModel):
     """Response model for document upload and ingestion."""
+    id: Optional[str] = Field(None, description="Persistent unique document ID in SQLite")
     filename: str = Field(..., description="Original filename of the uploaded PDF")
     total_pages: int = Field(..., description="Total number of extracted pages")
     total_characters: int = Field(..., description="Total character count across all pages")
@@ -31,10 +33,33 @@ class DocumentUploadResponse(BaseModel):
     indexed_vectors: int = Field(..., description="Number of vectors stored in FAISS")
     status: str = Field(default="success", description="Processing status")
     message: str = Field(default="Document successfully processed and indexed in FAISS.", description="Status message")
+    created_at: Optional[str] = Field(None, description="ISO timestamp of document ingestion")
+
+
+class DocumentRecordResponse(BaseModel):
+    """Full representation of a persisted document record in SQLite."""
+    id: str = Field(..., description="Unique document ID")
+    filename: str = Field(..., description="Original filename")
+    file_path: Optional[str] = Field(None, description="Stored file path")
+    file_size_bytes: Optional[int] = Field(0, description="Size in bytes")
+    total_pages: int = Field(..., description="Total page count")
+    total_characters: int = Field(..., description="Total character count")
+    total_chunks: int = Field(..., description="Total chunks created")
+    indexed_vectors: int = Field(..., description="Vectors indexed in FAISS")
+    status: str = Field(..., description="Document status")
+    created_at: str = Field(..., description="Creation ISO timestamp")
+    updated_at: str = Field(..., description="Last update ISO timestamp")
+
+
+class DocumentListResponse(BaseModel):
+    """Paginated list of persistent document records."""
+    total: int = Field(..., description="Total number of document records")
+    documents: List[DocumentRecordResponse] = Field(default_factory=list, description="List of document records")
 
 
 class DocumentStatsResponse(BaseModel):
     """Response model for current document and vector store statistics."""
+    id: Optional[str] = Field(None, description="Database document ID if available")
     document_name: Optional[str] = Field(None, description="Name of the currently indexed document")
     total_pages: int = Field(0, description="Total pages in the document")
     total_characters: int = Field(0, description="Total character count")
