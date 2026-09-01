@@ -1,18 +1,72 @@
 """
-VeriDoc — FastAPI Backend Application Entrypoint
+VeriDoc — FastAPI Backend Application Entrypoint (Phase 8)
+
+Provides REST endpoints for:
+1. Health & status inspection (/health)
+2. PDF Document ingestion & FAISS indexing (/documents/upload)
+3. Question answering with grounded Gemini responses & citations (/questions/ask)
 """
 
+import os
+from pathlib import Path
+from typing import Optional
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+# Ensure .env is loaded if present
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _load_env_file() -> None:
+    env_path = PROJECT_ROOT / ".env"
+    if env_path.exists():
+        try:
+            with open(env_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1)
+                        k = k.strip()
+                        v = v.strip().strip("'\"")
+                        if k and k not in os.environ:
+                            os.environ[k] = v
+        except Exception:
+            pass
+
+
+_load_env_file()
+
+from backend.models.schemas import HealthResponse
+from backend.services.rag_pipeline import RAGPipeline
+
+# Global RAGPipeline singleton for FastAPI runtime
+_rag_pipeline_instance: Optional[RAGPipeline] = None
+
+
+def get_rag_pipeline() -> RAGPipeline:
+    """Dependency injection provider for the shared RAGPipeline instance."""
+    global _rag_pipeline_instance
+    if _rag_pipeline_instance is None:
+        _rag_pipeline_instance = RAGPipeline()
+    return _rag_pipeline_instance
+
+
+def set_rag_pipeline(pipeline: Optional[RAGPipeline]) -> None:
+    """Helper to set or reset the pipeline instance (useful in test setups)."""
+    global _rag_pipeline_instance
+    _rag_pipeline_instance = pipeline
+
 
 # Initialize FastAPI application
 app = FastAPI(
     title="VeriDoc API",
-    description="AI Document Intelligence Platform — RAG Backend",
+    description="AI Document Intelligence Platform — Grounded RAG Backend powered by FAISS and Google Gemini",
     version="0.1.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
 )
 
-# Configure CORS for frontend access
+# Configure CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -22,14 +76,50 @@ app.add_middleware(
 )
 
 
-@app.get("/")
+# -----------------------------------------------------------------------------
+# System & Health Endpoints
+# -----------------------------------------------------------------------------
+
+@app.get(
+    "/",
+    tags=["system"],
+    summary="Root service info",
+    description="Returns basic service information and running status.",
+)
 async def root():
-    """Health check / root endpoint."""
-    return {"message": "VeriDoc API is running", "status": "healthy"}
+    """Root endpoint."""
+    return {"message": "VeriDoc API is running", "status": "healthy", "version": "0.1.0"}
 
 
-# TODO: Register routers in Phase 8
-# from backend.api.documents import router as documents_router
-# from backend.api.questions import router as questions_router
-# app.include_router(documents_router, prefix="/api/v1/documents", tags=["documents"])
-# app.include_router(questions_router, prefix="/api/v1/questions", tags=["questions"])
+@app.get(
+    "/health",
+    response_model=HealthResponse,
+    tags=["system"],
+    summary="Health check",
+    description="Returns the health status of the API and vector index readiness.",
+)
+async def health():
+    """Health check endpoint."""
+    pipeline = get_rag_pipeline()
+    return HealthResponse(
+        status="healthy",
+        service="VeriDoc API",
+        version="0.1.0",
+        is_document_indexed=pipeline.is_ready(),
+    )
+
+
+# -----------------------------------------------------------------------------
+# Register API Routers
+# -----------------------------------------------------------------------------
+
+from backend.api.documents import router as documents_router
+from backend.api.questions import router as questions_router
+
+# Direct routes for specification compatibility (/documents/upload, /questions/ask)
+app.include_router(documents_router, prefix="/documents")
+app.include_router(questions_router, prefix="/questions")
+
+# Versioned API routes for production compatibility (/api/v1/documents, /api/v1/questions)
+app.include_router(documents_router, prefix="/api/v1/documents", include_in_schema=False)
+app.include_router(questions_router, prefix="/api/v1/questions", include_in_schema=False)
