@@ -16,7 +16,7 @@ from backend.services.vector_store import SearchResult
 
 
 # Default recommended Gemini model for fast, high-quality responses
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.6-flash"
 
 
 # -----------------------------------------------------------------------------

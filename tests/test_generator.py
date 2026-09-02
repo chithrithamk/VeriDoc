@@ -69,9 +69,9 @@ def mock_genai_client():
 
 def test_generator_initialization_with_mock_client(mock_genai_client):
     """Test that AnswerGenerator initializes cleanly with an injected client."""
-    generator = AnswerGenerator(client=mock_genai_client, model_name="gemini-2.5-flash")
+    generator = AnswerGenerator(client=mock_genai_client, model_name="gemini-3.6-flash")
     assert generator.client is mock_genai_client
-    assert generator.model_name == "gemini-2.5-flash"
+    assert generator.model_name == "gemini-3.6-flash"
 
 
 def test_generator_missing_api_key_raises_configuration_error():
