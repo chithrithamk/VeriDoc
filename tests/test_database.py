@@ -82,10 +82,12 @@ def test_create_and_get_document_record(test_db_session):
 
 def test_get_latest_document_record(test_db_session):
     """Test retrieving the latest uploaded document."""
+    import time
+
     # When empty
     assert get_latest_document_record(test_db_session) is None
 
-    # Insert two documents
+    # Insert two documents with distinct timestamps
     doc1 = create_document_record(
         db=test_db_session,
         filename="first.pdf",
@@ -94,6 +96,7 @@ def test_get_latest_document_record(test_db_session):
         total_chunks=1,
         indexed_vectors=1,
     )
+    time.sleep(0.02)
     doc2 = create_document_record(
         db=test_db_session,
         filename="second.pdf",

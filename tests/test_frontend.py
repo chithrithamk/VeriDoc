@@ -39,7 +39,7 @@ def blank_pdf_bytes():
 
 def test_frontend_initial_render():
     """Test that the initial Streamlit page renders with title and controls."""
-    at = AppTest.from_file(str(FRONTEND_APP_PATH)).run()
+    at = AppTest.from_file(str(FRONTEND_APP_PATH)).run(timeout=15)
     assert len(at.title) == 1
     assert "VeriDoc" in at.title[0].value
     assert len(at.sidebar.file_uploader) == 1
@@ -47,11 +47,11 @@ def test_frontend_initial_render():
 
 def test_frontend_upload_and_chunk_viewer_flow(sample_pdf_bytes):
     """Test full upload, chunking, indexing, and visual inspection tabs in the Streamlit UI."""
-    at = AppTest.from_file(str(FRONTEND_APP_PATH)).run()
+    at = AppTest.from_file(str(FRONTEND_APP_PATH)).run(timeout=15)
 
     # Upload PDF document
     at.sidebar.file_uploader[0].upload(filename="research_paper.pdf", content=sample_pdf_bytes)
-    at.run()
+    at.run(timeout=15)
 
     # Verify Process Document button appears
     assert len(at.sidebar.button) == 1
@@ -59,7 +59,7 @@ def test_frontend_upload_and_chunk_viewer_flow(sample_pdf_bytes):
 
     # Click Process Document button
     at.sidebar.button[0].click()
-    at.run()
+    at.run(timeout=15)
 
     # Verify metrics (Filename, Total Pages, Total Characters, Total Chunks, Indexed Vectors)
     metric_values = [m.value for m in at.metric]
@@ -76,13 +76,13 @@ def test_frontend_upload_and_chunk_viewer_flow(sample_pdf_bytes):
 
 def test_frontend_blank_pdf_warning(blank_pdf_bytes):
     """Test that uploading a PDF without extractable text shows the appropriate warning."""
-    at = AppTest.from_file(str(FRONTEND_APP_PATH)).run()
+    at = AppTest.from_file(str(FRONTEND_APP_PATH)).run(timeout=15)
 
     at.sidebar.file_uploader[0].upload(filename="scanned_blank.pdf", content=blank_pdf_bytes)
-    at.run()
+    at.run(timeout=15)
 
     at.sidebar.button[0].click()
-    at.run()
+    at.run(timeout=15)
 
     assert len(at.warning) >= 1
     assert "No extractable text was found in this PDF." in at.warning[0].value
@@ -90,15 +90,16 @@ def test_frontend_blank_pdf_warning(blank_pdf_bytes):
 
 def test_frontend_qa_interface_renders_after_processing(sample_pdf_bytes):
     """Test that Q&A question input form renders when a document is processed."""
-    at = AppTest.from_file(str(FRONTEND_APP_PATH)).run()
+    at = AppTest.from_file(str(FRONTEND_APP_PATH)).run(timeout=15)
 
     at.sidebar.file_uploader[0].upload(filename="document.pdf", content=sample_pdf_bytes)
-    at.run()
+    at.run(timeout=15)
     at.sidebar.button[0].click()
-    at.run()
+    at.run(timeout=15)
 
     # Verify Q&A input and submit button exist
     assert len(at.text_input) >= 1
     assert any("Your Question" in inp.label for inp in at.text_input)
     assert len(at.button) >= 1
     assert any("Search & Generate Answer" in btn.label for btn in at.button)
+

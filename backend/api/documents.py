@@ -10,10 +10,12 @@ from sqlalchemy.orm import Session
 
 from backend.database.repository import (
     clear_all_document_records,
+    count_question_records,
     create_document_record,
     get_document_record_by_id,
     get_latest_document_record,
     list_document_records,
+    list_questions_for_document,
 )
 from backend.database.session import get_db
 from backend.models.schemas import (
@@ -21,6 +23,10 @@ from backend.models.schemas import (
     DocumentRecordResponse,
     DocumentStatsResponse,
     DocumentUploadResponse,
+    QuestionHistoryItemResponse,
+    QuestionHistoryListResponse,
+    SourceCitation,
+    SupportCheckResponse,
 )
 from backend.services.pdf_processor import (
     CorruptedPDFError,
@@ -72,10 +78,10 @@ async def upload_document(
             detail="chunk_overlap must be strictly less than chunk_size.",
         )
 
-    # Save uploaded file temporarily for PyMuPDF processing
-    temp_dir = PROJECT_ROOT / "data" / "documents"
-    temp_dir.mkdir(parents=True, exist_ok=True)
-    temp_file_path = temp_dir / f"api_temp_{uuid.uuid4().hex[:8]}_{filename}"
+    # Save uploaded file temporarily in an isolated folder to preserve original filename
+    temp_subdir = PROJECT_ROOT / "data" / "documents" / f"upload_{uuid.uuid4().hex[:8]}"
+    temp_subdir.mkdir(parents=True, exist_ok=True)
+    temp_file_path = temp_subdir / filename
 
     file_size_bytes = 0
     try:
@@ -130,10 +136,15 @@ async def upload_document(
             detail=f"An unexpected error occurred during document ingestion: {err}",
         )
     finally:
-        # Clean up temporary upload file
+        # Clean up temporary upload file and folder
         if temp_file_path.exists():
             try:
                 temp_file_path.unlink()
+            except Exception:
+                pass
+        if temp_subdir.exists():
+            try:
+                temp_subdir.rmdir()
             except Exception:
                 pass
 
@@ -226,6 +237,67 @@ async def get_document_by_id(
         created_at=record.created_at.isoformat(),
         updated_at=record.updated_at.isoformat(),
     )
+
+
+@router.get(
+    "/{doc_id}/questions",
+    response_model=QuestionHistoryListResponse,
+    summary="Get persistent Q&A history for a specific document",
+    description="Retrieves all question records associated with a document ID from SQLite.",
+)
+async def get_document_questions(
+    doc_id: str,
+    limit: int = Query(default=50, ge=1, le=100, description="Max records to return"),
+    offset: int = Query(default=0, ge=0, description="Pagination offset"),
+    db: Session = Depends(get_db),
+) -> QuestionHistoryListResponse:
+    """Retrieves question history for a given document ID."""
+    doc = get_document_record_by_id(db=db, doc_id=doc_id)
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID '{doc_id}' not found.",
+        )
+
+    records = list_questions_for_document(db=db, document_id=doc_id, limit=limit, offset=offset)
+    total = count_question_records(db=db, document_id=doc_id)
+
+    items = []
+    for r in records:
+        sources = [
+            SourceCitation(
+                chunk_id=s.get("chunk_id", 0),
+                page_number=s.get("page_number", 1),
+                document_name=s.get("document_name", "document.pdf"),
+                char_count=s.get("char_count", len(s.get("text", ""))),
+                text=s.get("text", ""),
+                similarity_score=float(s.get("similarity_score", 0.0)),
+            )
+            for s in (r.sources_data or [])
+        ]
+        supp = None
+        if r.support_status:
+            supp = SupportCheckResponse(
+                status=r.support_status,
+                confidence=float(r.support_confidence) if r.support_confidence is not None else 0.0,
+                explanation=r.support_explanation or "",
+                supported_claims=list(r.supported_claims) if r.supported_claims else [],
+                unsupported_claims=list(r.unsupported_claims) if r.unsupported_claims else [],
+            )
+        items.append(
+            QuestionHistoryItemResponse(
+                id=r.id,
+                document_id=r.document_id,
+                document_name=r.document_name,
+                question=r.question,
+                answer=r.answer,
+                sources=sources,
+                support=supp,
+                created_at=r.created_at.isoformat(),
+            )
+        )
+
+    return QuestionHistoryListResponse(total=total, questions=items)
 
 
 @router.delete(

@@ -32,6 +32,7 @@ from backend.services.pdf_processor import (
     extract_text_from_pdf,
 )
 from backend.services.retrieval import RetrievalService
+from backend.services.support_checker import SupportChecker, SupportCheckResult, SupportStatus
 from backend.services.vector_store import FAISSVectorStore, SearchResult
 
 
@@ -66,10 +67,11 @@ class RAGPipeline:
             model_name=self.embedding_model,
         )
 
-        # Answer Generator Service (lazy or direct init)
+        # Answer Generator & Support Checker (lazy or direct init)
         self.api_key = api_key
         self.llm_client = llm_client
         self._generator: Optional[AnswerGenerator] = None
+        self._support_checker: Optional[SupportChecker] = None
 
         # Document & Chunk State
         self.document: Optional[ExtractedDocument] = None
@@ -86,6 +88,17 @@ class RAGPipeline:
                 client=self.llm_client,
             )
         return self._generator
+
+    @property
+    def support_checker(self) -> SupportChecker:
+        """Lazily initialize and return the SupportChecker instance."""
+        if self._support_checker is None:
+            self._support_checker = SupportChecker(
+                api_key=self.api_key,
+                model_name=self.llm_model,
+                client=self.llm_client,
+            )
+        return self._support_checker
 
     def is_ready(self) -> bool:
         """Returns True if the pipeline has an active, populated vector index."""
@@ -185,17 +198,19 @@ class RAGPipeline:
         self,
         question: str,
         top_k: int = 5,
+        check_support: bool = True,
     ) -> GeneratedAnswer:
         """
         Executes end-to-end RAG question answering:
-        Question -> Semantic Retrieval -> Grounded Context Prompt -> Gemini Answer.
+        Question -> Semantic Retrieval -> Grounded Context Prompt -> Gemini Answer -> Support Checker.
 
         Args:
             question: Natural language question.
             top_k: Number of most relevant chunks to retrieve.
+            check_support: Whether to run factual support verification (default: True).
 
         Returns:
-            GeneratedAnswer: Object containing question, answer text, and source references.
+            GeneratedAnswer: Object containing question, answer text, source references, and support result.
 
         Raises:
             RuntimeError: If called before a document is ingested and indexed.
@@ -208,12 +223,22 @@ class RAGPipeline:
                 "No document has been processed or indexed yet. Ingest a PDF document first."
             )
 
-        return generate_rag_answer(
+        answer = generate_rag_answer(
             question=question,
             retrieval_service=self.retrieval_service,
             generator=self.generator,
             top_k=top_k,
         )
+
+        if check_support:
+            support_result = self.support_checker.check_support(
+                question=question,
+                answer=answer.answer,
+                sources=answer.sources,
+            )
+            answer.support = support_result
+
+        return answer
 
     def retrieve(
         self,

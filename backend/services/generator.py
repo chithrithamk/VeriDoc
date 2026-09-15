@@ -40,19 +40,25 @@ class LLMGenerationError(Exception):
 @dataclass
 class GeneratedAnswer:
     """
-    Represents a complete grounded answer produced by the LLM alongside its source chunks.
+    Represents a complete grounded answer produced by the LLM alongside its source chunks and verification result.
     """
     question: str
     answer: str
     sources: List[SearchResult] = field(default_factory=list)
+    support: Optional[Any] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert the answer and source metadata into a dictionary."""
-        return {
+        """Convert the answer, source metadata, and support check into a dictionary."""
+        data = {
             "question": self.question,
             "answer": self.answer,
             "sources": [source.to_dict() for source in self.sources],
         }
+        if self.support is not None:
+            data["support"] = self.support.to_dict() if hasattr(self.support, "to_dict") else self.support
+        else:
+            data["support"] = None
+        return data
 
 
 # -----------------------------------------------------------------------------

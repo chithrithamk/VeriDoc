@@ -1,15 +1,16 @@
 """
-VeriDoc — Streamlit Frontend Application (Phase 7)
+VeriDoc — Streamlit Frontend Application (Phases 7 & 10)
 
 Interactive user interface for:
 1. Uploading PDF documents
 2. Extracting structured page-level text (PyMuPDF)
 3. Sentence-boundary-aware text chunking
 4. Embedding generation & FAISS vector store indexing
-5. Natural language Question Answering via Semantic Retrieval & Google Gemini
-6. Transparent source citations and visual chunk inspection
+5. Multi-question natural language Q&A via Semantic Retrieval & Google Gemini
+6. Transparent source citations with page numbers, similarity scores, and session history
 """
 
+from datetime import datetime
 import os
 from pathlib import Path
 import sys
@@ -64,6 +65,26 @@ from backend.services.generator import (
     LLMGenerationError,
     generate_rag_answer,
 )
+from backend.services.support_checker import (
+    SupportChecker,
+    SupportCheckResult,
+    SupportStatus,
+)
+from backend.database import (
+    clear_all_question_records,
+    count_question_records,
+    create_document_record,
+    create_question_record,
+    get_latest_document_record,
+    init_db,
+    list_question_records,
+    list_questions_for_document,
+)
+from backend.database.session import get_db
+
+# Ensure database tables exist
+init_db()
+
 
 # -----------------------------------------------------------------------------
 # Page Configuration & Styling
@@ -75,7 +96,7 @@ st.set_page_config(
 )
 
 st.title("📄 VeriDoc — AI Document Intelligence Platform")
-st.caption("Upload PDFs, extract and index text with FAISS, and ask natural language questions with Gemini.")
+st.caption("Upload PDFs, index text in FAISS, and ask multiple natural language questions with source citations.")
 
 # -----------------------------------------------------------------------------
 # Session State Initialization
@@ -190,7 +211,7 @@ with st.sidebar:
                         store = FAISSVectorStore()
                         store.build([])
 
-                # Persist in session state
+                # Persist in session state and reset Q&A history for the new document
                 st.session_state.extracted_doc = extracted_doc
                 st.session_state.document_chunks = chunks
                 st.session_state.embedded_chunks = embedded_chunks
@@ -199,8 +220,26 @@ with st.sidebar:
                 st.session_state.used_chunk_size = int(chunk_size)
                 st.session_state.used_chunk_overlap = int(chunk_overlap)
                 st.session_state.latest_answer = None
+                st.session_state.qa_history = []
+
+                # Persist document metadata in SQLite database
+                try:
+                    with next(get_db()) as db:
+                        create_document_record(
+                            db=db,
+                            filename=uploaded_file.name,
+                            total_pages=extracted_doc.total_pages,
+                            total_characters=extracted_doc.total_characters,
+                            total_chunks=len(chunks),
+                            indexed_vectors=len(store),
+                            file_size_bytes=getattr(uploaded_file, "size", 0) or 0,
+                            status="indexed",
+                        )
+                except Exception:
+                    pass
 
                 st.success("Document extracted, chunked, and indexed in FAISS successfully!")
+
 
             except ValueError as err:
                 st.error(f"Configuration Error: {err}")
@@ -228,6 +267,7 @@ with st.sidebar:
         st.session_state.vector_store = None
         st.session_state.processed_filename = None
         st.session_state.latest_answer = None
+        st.session_state.qa_history = []
 
 # -----------------------------------------------------------------------------
 # Main Display Area
@@ -256,26 +296,29 @@ if st.session_state.extracted_doc is not None and st.session_state.vector_store 
     if not doc.has_text or doc.total_characters == 0 or len(chunks) == 0:
         st.warning("No extractable text was found in this PDF. Vector index cannot be queried.")
     else:
-        # Main Navigation Tabs: Q&A | Chunks | Pages
-        tab_qa, tab_chunks, tab_pages = st.tabs([
+        # Main Navigation Tabs: Q&A | Persistent History | Chunks | Pages
+        tab_qa, tab_history, tab_chunks, tab_pages = st.tabs([
             "💬 Ask Document (RAG)",
+            "📜 Persistent Q&A History",
             "✂️ Document Chunks",
             "📑 Extracted Pages",
         ])
 
+
         # ---------------------------------------------------------------------
-        # Tab 1: Q&A (RAG Pipeline)
+        # Tab 1: Q&A (RAG Pipeline with Source Citations & History)
         # ---------------------------------------------------------------------
         with tab_qa:
             st.subheader("💬 Ask Questions About Your Document")
-            st.caption("Ask natural-language questions. VeriDoc retrieves relevant chunks and generates a grounded response.")
+            st.caption("Ask natural-language questions. You can ask multiple questions without re-processing the document.")
 
-            # Question Input Form
+            # Question Input Form (Input remains editable and re-submittable)
             with st.form("rag_question_form", clear_on_submit=False):
                 user_question = st.text_input(
                     "Your Question:",
                     placeholder="e.g., What are the main findings or objectives described in this document?",
                     key="question_input_field",
+                    help="Type your question. You can edit, erase, and ask another question at any time.",
                 )
                 submit_button = st.form_submit_button("🔍 Search & Generate Answer", type="primary")
 
@@ -286,45 +329,132 @@ if st.session_state.extracted_doc is not None and st.session_state.vector_store 
                     st.error("Vector index is not built. Please process a valid PDF first.")
                 else:
                     try:
-                        with st.spinner("Retrieving relevant chunks and generating answer..."):
+                        with st.spinner("Retrieving relevant chunks, generating answer & verifying support..."):
                             retrieval_service = RetrievalService(vector_store=store)
                             generator = AnswerGenerator()
+                            support_checker = SupportChecker()
 
-                            answer_result: GeneratedAnswer = generate_rag_answer(
+                            # 1. Retrieve evidence
+                            sources = retrieval_service.retrieve(query=user_question.strip(), top_k=int(top_k))
+
+                            # 2. Generate grounded answer
+                            answer_result: GeneratedAnswer = generator.generate_answer(
                                 question=user_question.strip(),
-                                retrieval_service=retrieval_service,
-                                generator=generator,
-                                top_k=int(top_k),
+                                sources=sources,
                             )
 
+                            # 3. Verify factual support against retrieved evidence
+                            support_result: SupportCheckResult = support_checker.check_support(
+                                question=user_question.strip(),
+                                answer=answer_result.answer,
+                                sources=sources,
+                            )
+                            answer_result.support = support_result
+
                             st.session_state.latest_answer = answer_result
-                            st.session_state.qa_history.insert(0, answer_result)
+                            st.session_state.qa_history.insert(0, {
+                                "question": user_question.strip(),
+                                "answer": answer_result.answer,
+                                "sources": answer_result.sources,
+                                "support": support_result,
+                                "timestamp": datetime.now().strftime("%H:%M:%S"),
+                            })
+
+                            # 4. Persist Q&A record into SQLite database
+                            try:
+                                with next(get_db()) as db:
+                                    latest_doc = get_latest_document_record(db)
+                                    doc_id = latest_doc.id if latest_doc else None
+                                    doc_name = latest_doc.filename if latest_doc else (st.session_state.processed_filename or "document.pdf")
+                                    sources_dicts = [
+                                        {
+                                            "chunk_id": s.chunk.chunk_id,
+                                            "page_number": s.chunk.page_number,
+                                            "document_name": s.chunk.document_name,
+                                            "char_count": s.chunk.char_count,
+                                            "text": s.chunk.text,
+                                            "similarity_score": float(s.score),
+                                        }
+                                        for s in sources
+                                    ]
+                                    create_question_record(
+                                        db=db,
+                                        question=user_question.strip(),
+                                        answer=answer_result.answer,
+                                        document_id=doc_id,
+                                        document_name=doc_name,
+                                        sources=sources_dicts,
+                                        support_status=support_result.status if support_result else None,
+                                        support_confidence=support_result.confidence if support_result else None,
+                                        support_explanation=support_result.explanation if support_result else None,
+                                        supported_claims=support_result.supported_claims if support_result else [],
+                                        unsupported_claims=support_result.unsupported_claims if support_result else [],
+                                    )
+                            except Exception:
+                                pass
 
                     except LLMConfigurationError as err:
                         st.error(f"Configuration Error: {err}")
                     except LLMGenerationError as err:
-                        st.error(f"LLM Generation Error: {err}")
+                        st.error(f"LLM Generation Error: {err}. Please check your quota or try again.")
                     except Exception as err:
                         st.error(f"An unexpected error occurred during Q&A: {err}")
 
-            # Display Latest Answer & Citations
+
+            # Display Latest Answer & Verification Status
             if st.session_state.latest_answer is not None:
                 ans: GeneratedAnswer = st.session_state.latest_answer
 
-                st.markdown("### 💡 Answer")
+                st.markdown("### 💡 Grounded Answer")
                 st.info(ans.answer)
 
-                st.markdown("### 📚 Source Citations & Retrieved Context")
+                # Display Factual Support Verification Result
+                if ans.support is not None:
+                    supp: SupportCheckResult = ans.support
+                    status = supp.status
+                    conf_pct = int(supp.confidence * 100) if supp.confidence <= 1.0 else int(supp.confidence)
+
+                    st.markdown("### 🛡️ Factual Support & Hallucination Check")
+                    if status == "supported":
+                        st.success(f"✅ **Answer Supported by Document** (Confidence: {conf_pct}%)")
+                    elif status == "partially_supported":
+                        st.warning(f"🟡 **Partially Supported** (Confidence: {conf_pct}%)")
+                    elif status == "unsupported":
+                        st.error(f"⚠️ **Answer Not Fully Supported** (Confidence: {conf_pct}%)")
+                    elif status == "insufficient_evidence":
+                        st.info(f"🔍 **Insufficient Evidence** (Confidence: {conf_pct}%)")
+                    else:
+                        st.info(f"ℹ️ **Verification Status:** `{status}`")
+
+                    if supp.explanation:
+                        st.caption(f"**Analysis:** {supp.explanation}")
+
+                    if supp.unsupported_claims:
+                        with st.expander("⚠️ Unsupported / Unverified Claims", expanded=True):
+                            for claim in supp.unsupported_claims:
+                                st.markdown(f"- ❌ {claim}")
+
+                    if supp.supported_claims and status != "supported":
+                        with st.expander("✅ Verified Supported Claims", expanded=False):
+                            for claim in supp.supported_claims:
+                                st.markdown(f"- ✔️ {claim}")
+
+                st.markdown("### 📚 Sources / Evidence")
                 if ans.sources:
                     for i, src in enumerate(ans.sources, start=1):
                         c = src.chunk
                         with st.expander(
-                            f"Source #{i}: Page {c.page_number} (Chunk #{c.chunk_id}) | Similarity Score: {src.score:.3f} | {c.document_name}",
+                            f"Source {i} — Page {c.page_number} | Document: {c.document_name} (Similarity: {src.score:.3f})",
                             expanded=(i == 1),
                         ):
-                            st.markdown(f"**Document:** `{c.document_name}` &nbsp;|&nbsp; **Page:** `{c.page_number}` &nbsp;|&nbsp; **Chunk ID:** `#{c.chunk_id}` &nbsp;|&nbsp; **Cosine Score:** `{src.score:.4f}`")
+                            st.markdown(
+                                f"**Document:** `{c.document_name}` &nbsp;|&nbsp; "
+                                f"**Page:** `{c.page_number}` &nbsp;|&nbsp; "
+                                f"**Chunk ID:** `#{c.chunk_id}` &nbsp;|&nbsp; "
+                                f"**Similarity Score:** `{src.score:.4f}`"
+                            )
                             st.text_area(
-                                label=f"Chunk {c.chunk_id} Content",
+                                label=f"Source {i} Text",
                                 value=c.text,
                                 height=120,
                                 disabled=True,
@@ -334,8 +464,121 @@ if st.session_state.extracted_doc is not None and st.session_state.vector_store 
                 else:
                     st.caption("No relevant chunks were retrieved for this query.")
 
+            # Display Session Q&A History
+            if len(st.session_state.qa_history) > 1:
+                st.divider()
+                h_col1, h_col2 = st.columns([4, 1])
+                with h_col1:
+                    st.markdown("### 📜 Q&A Session History")
+                with h_col2:
+                    if st.button("🗑️ Clear History", key="btn_clear_history"):
+                        st.session_state.qa_history = []
+                        st.session_state.latest_answer = None
+                        st.rerun()
+
+                for h_idx, item in enumerate(st.session_state.qa_history[1:], start=1):
+                    with st.expander(f"Q: {item['question']} ({item.get('timestamp', '')})", expanded=False):
+                        if item.get("support"):
+                            s_obj = item["support"]
+                            s_status = s_obj.status if hasattr(s_obj, "status") else s_obj.get("status", "")
+                            s_icon = "✅" if s_status == "supported" else ("🟡" if s_status == "partially_supported" else ("⚠️" if s_status == "unsupported" else "🔍"))
+                            st.markdown(f"**Verification Status:** {s_icon} `{s_status}`")
+
+                        st.markdown(f"**Answer:** {item['answer']}")
+                        if item.get("sources"):
+                            st.markdown("**Evidence / Sources:**")
+                            for s_idx, s in enumerate(item["sources"], start=1):
+                                sc = s.chunk
+                                st.markdown(
+                                    f"- **Source {s_idx} (Page {sc.page_number}, Chunk #{sc.chunk_id}):** "
+                                    f"{sc.text[:200]}... *(Score: {s.score:.3f})*"
+                                )
+
         # ---------------------------------------------------------------------
-        # Tab 2: Document Chunks Visual Inspector
+        # Tab 2: Persistent Q&A History (Loaded directly from SQLite)
+        # ---------------------------------------------------------------------
+        with tab_history:
+            st.subheader("📜 Persistent Q&A History (SQLite Database)")
+            st.caption("Historical questions, answers, support checks, and citations persisted in SQLite. Loaded directly without re-querying Gemini or FAISS.")
+
+            hist_col1, hist_col2 = st.columns([4, 1])
+            with hist_col2:
+                if st.button("🗑️ Clear Persistent History", key="btn_clear_persistent_history", type="secondary"):
+                    try:
+                        with next(get_db()) as db:
+                            cleared_count = clear_all_question_records(db)
+                        st.session_state.qa_history = []
+                        st.session_state.latest_answer = None
+                        st.success(f"Cleared {cleared_count} question records from SQLite database.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to clear history: {e}")
+
+            try:
+                with next(get_db()) as db:
+                    db_questions = list_question_records(db, limit=50)
+                    total_saved = count_question_records(db)
+            except Exception:
+                db_questions = []
+                total_saved = 0
+
+            with hist_col1:
+                st.info(f"**Total Persisted Questions in Database:** {total_saved}")
+
+            if not db_questions:
+                st.info("No persistent Q&A records found in the database. Ask a question to start recording history.")
+            else:
+                for q_idx, q_rec in enumerate(db_questions, start=1):
+                    created_str = q_rec.created_at.strftime("%Y-%m-%d %H:%M:%S") if q_rec.created_at else ""
+                    status_icon = "✅" if q_rec.support_status == "supported" else (
+                        "🟡" if q_rec.support_status == "partially_supported" else (
+                            "⚠️" if q_rec.support_status == "unsupported" else "🔍"
+                        )
+                    )
+                    with st.expander(
+                        f"#{q_idx} | {status_icon} Q: {q_rec.question} ({q_rec.document_name or 'Doc'} • {created_str})",
+                        expanded=(q_idx == 1),
+                    ):
+                        st.markdown(f"**Question:** {q_rec.question}")
+                        st.markdown(f"**Answer:** {q_rec.answer}")
+                        st.markdown(
+                            f"**Document:** `{q_rec.document_name or 'N/A'}` &nbsp;|&nbsp; "
+                            f"**Saved At:** `{created_str}` &nbsp;|&nbsp; "
+                            f"**Record ID:** `{q_rec.id}`"
+                        )
+
+                        # Support verification details
+                        if q_rec.support_status:
+                            st.markdown("---")
+                            conf_pct = int((q_rec.support_confidence or 0.0) * 100) if (q_rec.support_confidence or 0.0) <= 1.0 else int(q_rec.support_confidence or 0.0)
+                            st.markdown(f"**Support Verification:** {status_icon} `{q_rec.support_status}` (Confidence: {conf_pct}%)")
+                            if q_rec.support_explanation:
+                                st.caption(f"**Explanation:** {q_rec.support_explanation}")
+                            if q_rec.unsupported_claims:
+                                st.markdown("**Unsupported Claims:**")
+                                for claim in q_rec.unsupported_claims:
+                                    st.markdown(f"- ❌ {claim}")
+                            if q_rec.supported_claims and q_rec.support_status != "supported":
+                                st.markdown("**Supported Claims:**")
+                                for claim in q_rec.supported_claims:
+                                    st.markdown(f"- ✔️ {claim}")
+
+                        # Citations / Sources
+                        if q_rec.sources_data:
+                            st.markdown("---")
+                            st.markdown("**Evidence / Sources:**")
+                            for s_idx, src in enumerate(q_rec.sources_data, start=1):
+                                p_num = src.get("page_number", "N/A")
+                                c_id = src.get("chunk_id", "N/A")
+                                score = src.get("similarity_score", 0.0)
+                                text_preview = src.get("text", "")
+                                st.markdown(
+                                    f"- **Source {s_idx} (Page {p_num}, Chunk #{c_id}, Score: {score:.3f}):** "
+                                    f"{text_preview[:250]}..."
+                                )
+
+        # ---------------------------------------------------------------------
+        # Tab 3: Document Chunks Visual Inspector
         # ---------------------------------------------------------------------
         with tab_chunks:
             st.subheader("✂️ Document Chunks")
@@ -362,7 +605,7 @@ if st.session_state.extracted_doc is not None and st.session_state.vector_store 
                     )
 
         # ---------------------------------------------------------------------
-        # Tab 3: Raw Extracted Pages
+        # Tab 4: Raw Extracted Pages
         # ---------------------------------------------------------------------
         with tab_pages:
             st.subheader("📑 Raw Extracted Text (Page-by-Page)")
