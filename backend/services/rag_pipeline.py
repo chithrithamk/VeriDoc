@@ -127,16 +127,16 @@ class RAGPipeline:
     def ingest_pdf(
         self,
         pdf_path: Union[str, Path],
-        chunk_size: int = 1000,
-        chunk_overlap: int = 200,
+        chunk_size: int = 400,
+        chunk_overlap: int = 80,
     ) -> Dict[str, Any]:
         """
         Full ingestion pipeline: Extract -> Chunk -> Embed -> Index.
 
         Args:
             pdf_path: Path to the target PDF file.
-            chunk_size: Target character count per chunk.
-            chunk_overlap: Overlapping characters between consecutive chunks.
+            chunk_size: Target character count per chunk (default: 400).
+            chunk_overlap: Overlapping characters between consecutive chunks (default: 80).
 
         Returns:
             Dict[str, Any]: Ingestion summary and statistics.
@@ -154,16 +154,16 @@ class RAGPipeline:
     def ingest_document(
         self,
         extracted_doc: ExtractedDocument,
-        chunk_size: int = 1000,
-        chunk_overlap: int = 200,
+        chunk_size: int = 400,
+        chunk_overlap: int = 80,
     ) -> Dict[str, Any]:
         """
         Ingests an already extracted ExtractedDocument: Chunk -> Embed -> Index.
 
         Args:
             extracted_doc: ExtractedDocument instance from pdf_processor.
-            chunk_size: Target character count per chunk.
-            chunk_overlap: Overlapping characters between chunks.
+            chunk_size: Target character count per chunk (default: 400).
+            chunk_overlap: Overlapping characters between chunks (default: 80).
 
         Returns:
             Dict[str, Any]: Summary dictionary with ingestion stats.

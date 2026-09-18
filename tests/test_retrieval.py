@@ -59,8 +59,8 @@ def built_vector_store(sample_embedded_chunks):
 # -----------------------------------------------------------------------------
 
 def test_valid_query_returns_results(built_vector_store):
-    """Test that a valid query invokes embedding and returns SearchResult list."""
-    service = RetrievalService(vector_store=built_vector_store)
+    """Test that a valid query invokes embedding with is_query=True and returns SearchResult list."""
+    service = RetrievalService(vector_store=built_vector_store, use_reranker=False)
 
     # Mock embed_text to return a vector matching chunk 3
     with patch("backend.services.retrieval.embed_text", return_value=np.array([0.0, 0.0, 1.0, 0.0], dtype=np.float32)) as mock_embed:
@@ -70,6 +70,7 @@ def test_valid_query_returns_results(built_vector_store):
             "How does FAISS search work?",
             model_name=service.model_name,
             normalize=True,
+            is_query=True,
         )
 
         assert len(results) == 2
@@ -82,7 +83,7 @@ def test_valid_query_returns_results(built_vector_store):
 
 def test_top_k_limiting(built_vector_store):
     """Test that top_k restricts the number of returned chunks."""
-    service = RetrievalService(vector_store=built_vector_store)
+    service = RetrievalService(vector_store=built_vector_store, use_reranker=False)
 
     with patch("backend.services.retrieval.embed_text", return_value=np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)):
         results_1 = service.retrieve("Query text", top_k=1)
@@ -94,7 +95,7 @@ def test_top_k_limiting(built_vector_store):
 
 def test_results_ordered_by_similarity(built_vector_store):
     """Test that returned search results are ordered by similarity score in descending order."""
-    service = RetrievalService(vector_store=built_vector_store)
+    service = RetrievalService(vector_store=built_vector_store, use_reranker=False)
 
     # Vector closer to chunk 2 (0.9) than chunk 1 (0.4)
     with patch("backend.services.retrieval.embed_text", return_value=np.array([0.4, 0.9, 0.0, 0.0], dtype=np.float32)):
@@ -107,9 +108,60 @@ def test_results_ordered_by_similarity(built_vector_store):
         assert results[0].score >= results[1].score >= results[2].score
 
 
+def test_retrieval_two_stage_reranking(built_vector_store):
+    """Test that CrossEncoder reranking rescores and reorders candidates."""
+    from unittest.mock import MagicMock
+
+    mock_reranker = MagicMock()
+    # Score candidates based on relevance to query: chunk with 'chunking' gets 0.9, 'FAISS' gets 0.5, other gets 0.1
+    def mock_predict(pairs):
+        scores = []
+        for q, text in pairs:
+            if "chunking" in text.lower():
+                scores.append(0.9)
+            elif "faiss" in text.lower():
+                scores.append(0.5)
+            else:
+                scores.append(0.1)
+        return np.array(scores, dtype=np.float32)
+
+    mock_reranker.predict.side_effect = mock_predict
+
+    service = RetrievalService(
+        vector_store=built_vector_store,
+        use_reranker=True,
+        reranker_instance=mock_reranker,
+    )
+
+    with patch("backend.services.retrieval.embed_text", return_value=np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)):
+        results = service.retrieve("Tell me about chunking", top_k=3)
+
+        assert len(results) == 3
+        # Chunk 2 (about chunking) should be ranked first because reranker scored it 0.9
+        assert results[0].chunk.chunk_id == 2
+        assert pytest.approx(results[0].score, 0.001) == 0.9
+        # Chunk 3 (about FAISS) should be ranked second because reranker scored it 0.5
+        assert results[1].chunk.chunk_id == 3
+        assert pytest.approx(results[1].score, 0.001) == 0.5
+        # Chunk 1 should be ranked third because reranker scored it 0.1
+        assert results[2].chunk.chunk_id == 1
+        assert pytest.approx(results[2].score, 0.001) == 0.1
+
+
+def test_retrieval_use_reranker_disabled(built_vector_store):
+    """Test that use_reranker=False bypasses CrossEncoder and uses raw FAISS scores."""
+    service = RetrievalService(vector_store=built_vector_store, use_reranker=False)
+
+    with patch("backend.services.retrieval.embed_text", return_value=np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32)):
+        results = service.retrieve("Query", top_k=1)
+        assert len(results) == 1
+        assert results[0].chunk.chunk_id == 2
+        assert pytest.approx(results[0].score, 0.001) == 1.0
+
+
 def test_metadata_and_citations_preserved(built_vector_store):
     """Test that chunk ID, page number, document name, text, and embedding are preserved."""
-    service = RetrievalService(vector_store=built_vector_store)
+    service = RetrievalService(vector_store=built_vector_store, use_reranker=False)
 
     with patch("backend.services.retrieval.embed_text", return_value=np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)):
         results = service.retrieve("PDF extraction query", top_k=1)

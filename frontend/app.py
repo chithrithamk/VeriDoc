@@ -112,9 +112,9 @@ if "vector_store" not in st.session_state:
 if "processed_filename" not in st.session_state:
     st.session_state.processed_filename = None
 if "used_chunk_size" not in st.session_state:
-    st.session_state.used_chunk_size = 1000
+    st.session_state.used_chunk_size = 400
 if "used_chunk_overlap" not in st.session_state:
-    st.session_state.used_chunk_overlap = 200
+    st.session_state.used_chunk_overlap = 80
 if "qa_history" not in st.session_state:
     st.session_state.qa_history = []
 if "latest_answer" not in st.session_state:
@@ -136,16 +136,16 @@ with st.sidebar:
         "Chunk Size (characters)",
         min_value=100,
         max_value=5000,
-        value=1000,
-        step=100,
+        value=400,
+        step=50,
         help="Target maximum character count per text chunk.",
     )
     chunk_overlap = st.number_input(
         "Chunk Overlap (characters)",
         min_value=0,
         max_value=1000,
-        value=200,
-        step=50,
+        value=80,
+        step=20,
         help="Number of overlapping characters between consecutive chunks on the same page.",
     )
     top_k = st.slider(

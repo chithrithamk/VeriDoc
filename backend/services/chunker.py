@@ -80,6 +80,8 @@ def _find_word_end(text: str, start: int, target_end: int, min_end: int) -> int:
 def _find_word_start(text: str, target_pos: int, min_pos: int, max_pos: int) -> int:
     """
     Adjust a target overlap position to the nearest clean word boundary.
+    If no clean word boundary exists in [min_pos, max_pos], falls back to target_pos
+    to guarantee that effective overlap does not collapse below acceptable levels.
     """
     text_len = len(text)
     if target_pos <= min_pos:
@@ -110,22 +112,26 @@ def _find_word_start(text: str, target_pos: int, min_pos: int, max_pos: int) -> 
         pos -= 1
     while pos < max_pos and text[pos].isspace():
         pos += 1
-    return pos
+    if pos > min_pos and pos < max_pos:
+        return pos
+
+    # If no clean word boundary exists in target window, fall back to target_pos (raw index)
+    return target_pos
 
 
 # -----------------------------------------------------------------------------
 # Chunking Functions
 # -----------------------------------------------------------------------------
 
-def chunk_text(text: str, chunk_size: int = 1000, chunk_overlap: int = 200) -> List[str]:
+def chunk_text(text: str, chunk_size: int = 400, chunk_overlap: int = 80) -> List[str]:
     """
     Splits text into chunks of at most `chunk_size` characters with `chunk_overlap` overlap,
     strictly respecting sentence and word boundaries.
 
     Args:
         text: Input string to split.
-        chunk_size: Maximum target character length of each chunk.
-        chunk_overlap: Desired number of overlapping characters between consecutive chunks.
+        chunk_size: Maximum target character length of each chunk (default: 400).
+        chunk_overlap: Desired number of overlapping characters between consecutive chunks (default: 80).
 
     Returns:
         List[str]: List of non-empty text chunks.
@@ -182,7 +188,9 @@ def chunk_text(text: str, chunk_size: int = 1000, chunk_overlap: int = 200) -> L
 
         # Calculate overlap starting position at a clean word boundary
         target_overlap_start = max(start_idx + 1, cut_pos - chunk_overlap)
-        next_start = _find_word_start(clean_text, target_overlap_start, start_idx + 1, cut_pos)
+        # Restrict max overlap start position to ensure overlap floor (at least ~50% of chunk_overlap)
+        max_overlap_start = max(start_idx + 1, cut_pos - int(chunk_overlap * 0.5))
+        next_start = _find_word_start(clean_text, target_overlap_start, start_idx + 1, max_overlap_start)
 
         # Guarantee strict forward progress to avoid infinite loops
         if next_start <= start_idx:
@@ -199,8 +207,8 @@ def chunk_text(text: str, chunk_size: int = 1000, chunk_overlap: int = 200) -> L
 
 def chunk_document(
     document: ExtractedDocument,
-    chunk_size: int = 1000,
-    chunk_overlap: int = 200,
+    chunk_size: int = 400,
+    chunk_overlap: int = 80,
 ) -> List[DocumentChunk]:
     """
     Breaks an ExtractedDocument into structured DocumentChunks on a per-page basis,
@@ -208,8 +216,8 @@ def chunk_document(
 
     Args:
         document: ExtractedDocument instance containing pages and text.
-        chunk_size: Target maximum characters per chunk (default: 1000).
-        chunk_overlap: Desired number of overlapping characters between chunks (default: 200).
+        chunk_size: Target maximum characters per chunk (default: 400).
+        chunk_overlap: Desired number of overlapping characters between chunks (default: 80).
 
     Returns:
         List[DocumentChunk]: Sequential list of chunks with metadata attached.

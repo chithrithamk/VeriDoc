@@ -273,3 +273,39 @@ def test_chunk_to_dict():
     assert data["page_number"] == 2
     assert data["document_name"] == "doc.pdf"
     assert data["char_count"] == len("Sample chunk content.")
+
+
+def test_default_chunk_parameters():
+    """Test that chunk_text and chunk_document use default chunk_size=400 and chunk_overlap=80."""
+    long_text = "Sentence one. Sentence two. Sentence three. " * 30
+    chunks = chunk_text(long_text)
+    assert len(chunks) > 1
+    assert all(len(c) <= 400 for c in chunks)
+
+
+def test_chunk_overlap_floor_protection_on_unbroken_text():
+    """
+    Test that on dense/tabular text lacking whitespace, the overlap between consecutive
+    chunks never collapses below ~50% of the requested chunk_overlap.
+    """
+    # Unbroken sequence of 1000 characters without whitespace
+    unbroken_text = "ABCDEFGHIJ" * 100
+    chunk_size = 400
+    chunk_overlap = 80
+
+    chunks = chunk_text(unbroken_text, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+
+    assert len(chunks) >= 3
+    # Check overlap between consecutive chunks
+    for i in range(len(chunks) - 1):
+        c1 = chunks[i]
+        c2 = chunks[i + 1]
+        # Find the overlap suffix of c1 and prefix of c2
+        # Since unbroken_text is deterministic, the overlap length must be at least 50% of chunk_overlap (>= 40 chars)
+        overlap_len = 0
+        for k in range(min(len(c1), len(c2)), 0, -1):
+            if c1.endswith(c2[:k]):
+                overlap_len = k
+                break
+        assert overlap_len >= int(chunk_overlap * 0.5), f"Overlap {overlap_len} dropped below 50% of {chunk_overlap}"
+

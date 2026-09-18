@@ -21,9 +21,9 @@ Traditional document search relies on rigid keyword matching that often misses n
 ## Key Features
 
 - 📄 **PDF Extraction & Ingestion**: Robust text and metadata extraction from PDF files using PyMuPDF (`fitz`), handling multi-page layouts and blank pages gracefully.
-- ✂️ **Sentence-Boundary-Aware Chunking**: Configurable text splitting with sliding-window overlap that respects punctuation boundaries to prevent semantic mid-sentence truncations.
-- 🧠 **Dense Semantic Embeddings**: Generates 384-dimensional dense vectors using `sentence-transformers/all-MiniLM-L6-v2`.
-- ⚡ **FAISS Vector Store**: High-speed Cosine/L2 similarity vector indexing and nearest-neighbor search.
+- ✂️ **Sentence-Boundary-Aware Chunking**: Configurable text splitting (default 400 chars, 80 char overlap) with sliding-window overlap that respects punctuation boundaries and preserves an overlap floor.
+- 🧠 **Asymmetric Dense Semantic Embeddings**: Generates 384-dimensional dense vectors using `intfloat/e5-small-v2` with query and passage prefixing.
+- ⚡ **Two-Stage Semantic Retrieval & Reranking**: Combines sub-millisecond candidate retrieval via FAISS (`IndexFlatIP`) with precision cross-encoder reranking via `cross-encoder/ms-marco-MiniLM-L-6-v2`.
 - 🤖 **Context-Grounded Q&A**: LLM-powered answer generation using Google Gemini (`gemini-3.6-flash`) instructed to refuse out-of-context answering.
 - 📌 **Exact Source & Page Citations**: Every answer includes full attribution containing document name, exact page number, chunk ID, character count, and similarity score.
 - 🛡️ **Support & Hallucination Checking**: Built-in verification engine analyzing answer claims against source text, producing confidence scores and classifications (`supported`, `partially_supported`, `unsupported`, `insufficient_evidence`).
@@ -41,23 +41,26 @@ Traditional document search relies on rigid keyword matching that often misses n
 flowchart TD
     subgraph Ingestion["1. Document Ingestion & Indexing"]
         PDF["📄 PDF Document"] --> Extractor["PyMuPDF (fitz) Text Extraction"]
-        Extractor --> Chunker["Sentence-Boundary Chunker\n(Chunk Size: 1000, Overlap: 200)"]
-        Chunker --> Embedder["SentenceTransformer\n(all-MiniLM-L6-v2)"]
+        Extractor --> Chunker["Sentence-Boundary Chunker\n(Chunk Size: 400, Overlap: 80)"]
+        Chunker --> Embedder["SentenceTransformer\n(intfloat/e5-small-v2)"]
         Embedder --> FAISS[("⚡ FAISS Vector Index")]
         Extractor -.-> DocRecord[("🗄️ SQLite DB\nDocument Record")]
     end
 
-    subgraph Query["2. Retrieval & Grounded Generation"]
-        UserQ["❓ User Question"] --> QEmbed["Query Embedding"]
+    subgraph Query["2. Two-Stage Retrieval & Reranking"]
+        UserQ["❓ User Question"] --> QEmbed["Query Embedding\n(query: prefix)"]
         QEmbed --> FAISS
-        FAISS --> TopK["Top-K Retrieved Chunks\n(with Page Numbers & Scores)"]
+        FAISS --> CandidatePool["Candidate Chunks Pool\n(max k*4, 15)"]
+        CandidatePool --> Reranker["CrossEncoder Reranker\n(ms-marco-MiniLM-L-6-v2)"]
+        UserQ --> Reranker
+        Reranker --> TopK["Top-K Reranked Evidence\n(with Page Numbers & Scores)"]
+    end
+
+    subgraph Generation["3. Grounded Generation & Verification"]
         TopK --> PromptEngine["Prompt Construction\n(System Prompt + Grounded Context)"]
         UserQ --> PromptEngine
         PromptEngine --> Gemini["🤖 Google Gemini LLM\n(gemini-3.6-flash)"]
         Gemini --> RawAnswer["Generated Answer"]
-    end
-
-    subgraph Verification["3. Verification & Persistence"]
         RawAnswer --> SupportChecker["🛡️ Factual Support Checker\n(Claim Verification vs Context)"]
         TopK --> SupportChecker
         SupportChecker --> VerifiedPayload["Final Response\n• Grounded Answer\n• Page Citations\n• Support Confidence & Claims"]
@@ -77,13 +80,13 @@ flowchart TD
 1. **PDF Processing (`backend/services/pdf_processor.py`)**:
    PyMuPDF opens and validates uploaded PDF files, extracting clean UTF-8 text page-by-page while tracking page numbers and character counts.
 2. **Text Chunking (`backend/services/chunker.py`)**:
-   Splits text into chunks (default 1,000 chars, 200 char overlap) using regex sentence boundaries (`. `, `! `, `? `, `\n\n`) to preserve semantic coherence.
+   Splits text into chunks (default 400 chars, 80 char overlap) using regex sentence boundaries (`. `, `! `, `? `, `\n\n`) with overlap floor preservation.
 3. **Embedding Generation (`backend/services/embeddings.py`)**:
-   Encodes chunks into 384-dimensional dense vectors using `sentence-transformers/all-MiniLM-L6-v2` with normalized L2 vectors for cosine similarity computation.
+   Encodes chunks into 384-dimensional dense vectors using `intfloat/e5-small-v2` with `"passage: "` prefix and L2 normalization for cosine similarity computation.
 4. **Vector Store (`backend/services/vector_store.py`)**:
    Builds an in-memory `IndexFlatIP` FAISS index associating vector IDs directly with chunk metadata.
-5. **Semantic Retrieval (`backend/services/retrieval.py`)**:
-   Embeds incoming user queries and executes top-K nearest-neighbor search, returning scored evidence chunks.
+5. **Two-Stage Semantic Retrieval (`backend/services/retrieval.py`)**:
+   Encodes queries with `"query: "` prefix, retrieves an expanded candidate pool from FAISS, and reranks candidates with `cross-encoder/ms-marco-MiniLM-L-6-v2`.
 6. **Answer Generation (`backend/services/generator.py`)**:
    Formats a grounded system prompt combining the retrieved evidence and user query, calling Google Gemini (`gemini-3.6-flash`) with temperature 0.2.
 7. **Support Checking (`backend/services/support_checker.py`)**:
@@ -99,13 +102,14 @@ flowchart TD
 |---|---|---|
 | **Language** | Python 3.12 | Modern type-annotated Python runtime |
 | **PDF Extraction** | PyMuPDF (`fitz`) | Fast, high-fidelity PDF text extraction |
-| **Text Embeddings** | Sentence-Transformers | Local transformer inference (`all-MiniLM-L6-v2`) |
+| **Text Embeddings** | Sentence-Transformers | Asymmetric embeddings (`intfloat/e5-small-v2`) |
+| **Reranking** | CrossEncoder | Neural passage reranker (`cross-encoder/ms-marco-MiniLM-L-6-v2`) |
 | **Vector Search** | FAISS (`faiss-cpu`) | High-speed dense similarity indexing |
 | **LLM Inference** | Google Gemini (`google-genai`) | `gemini-3.6-flash` for grounded answering |
 | **REST Backend** | FastAPI & Uvicorn | Asynchronous RESTful API with Pydantic v2 schemas |
 | **Frontend UI** | Streamlit | Interactive data and document Q&A dashboard |
 | **ORM & Database** | SQLAlchemy & SQLite | Relational persistence for documents & history |
-| **Testing & QA** | pytest, pytest-cov, httpx | 136 unit, integration, and regression tests |
+| **Testing & QA** | pytest, pytest-cov, httpx | Automated unit, integration, and regression tests |
 | **Containerization** | Docker & Docker Compose | Multi-container architecture with volume sharing |
 
 ---

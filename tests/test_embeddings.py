@@ -162,9 +162,9 @@ def test_semantic_similarity_relative_ordering():
     related_text = "deep learning neural networks and AI algorithms"
     unrelated_text = "how to bake chocolate chip cookies in an oven"
 
-    q_vec = embed_text(query, normalize=True)
-    rel_vec = embed_text(related_text, normalize=True)
-    unrel_vec = embed_text(unrelated_text, normalize=True)
+    q_vec = embed_text(query, normalize=True, is_query=True)
+    rel_vec = embed_text(related_text, normalize=True, is_query=False)
+    unrel_vec = embed_text(unrelated_text, normalize=True, is_query=False)
 
     # Dot product of normalized vectors = Cosine Similarity in [-1, 1]
     sim_related = float(np.dot(q_vec, rel_vec))
@@ -172,3 +172,63 @@ def test_semantic_similarity_relative_ordering():
 
     assert sim_related > sim_unrelated
     assert sim_related > 0.4  # Strong positive semantic correlation
+
+
+# -----------------------------------------------------------------------------
+# Asymmetric Prefix & Query/Passage Tests
+# -----------------------------------------------------------------------------
+
+def test_query_and_passage_produce_different_vectors_for_same_text():
+    """
+    Test that embedding the same raw text as a query vs passage produces measurably
+    distinct vector representations because of the model's asymmetric prefixing.
+    """
+    sample_text = "Natural language processing for document search."
+    vec_query = embed_text(sample_text, is_query=True)
+    vec_passage = embed_text(sample_text, is_query=False)
+
+    assert isinstance(vec_query, np.ndarray)
+    assert isinstance(vec_passage, np.ndarray)
+    assert vec_query.shape == (384,)
+    assert vec_passage.shape == (384,)
+
+    # Vectors must differ measurably
+    diff = np.linalg.norm(vec_query - vec_passage)
+    assert diff > 0.01
+
+
+def test_embed_text_prepends_correct_prefix():
+    """
+    Test that embed_text prepends 'query: ' for queries and 'passage: ' for passages
+    when using e5 models by mocking SentenceTransformer.encode.
+    """
+    from unittest.mock import MagicMock, patch
+
+    mock_model = MagicMock()
+    mock_model.encode.return_value = np.zeros(384, dtype=np.float32)
+
+    with patch("backend.services.embeddings.load_embedding_model", return_value=mock_model):
+        embed_text("sample input", model_name="intfloat/e5-small-v2", is_query=True)
+        mock_model.encode.assert_called_with("query: sample input", normalize_embeddings=True, show_progress_bar=False)
+
+        embed_text("sample input", model_name="intfloat/e5-small-v2", is_query=False)
+        mock_model.encode.assert_called_with("passage: sample input", normalize_embeddings=True, show_progress_bar=False)
+
+
+def test_embed_texts_batch_prepends_correct_prefix():
+    """
+    Test that batch embed_texts correctly prepends prefix to each non-empty string.
+    """
+    from unittest.mock import MagicMock, patch
+
+    mock_model = MagicMock()
+    mock_model.encode.return_value = np.zeros((2, 384), dtype=np.float32)
+
+    with patch("backend.services.embeddings.load_embedding_model", return_value=mock_model):
+        embed_texts(["first", "second"], model_name="intfloat/e5-small-v2", is_query=True)
+        mock_model.encode.assert_called_with(
+            ["query: first", "query: second"],
+            batch_size=32,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+        )

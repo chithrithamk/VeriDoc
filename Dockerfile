@@ -23,9 +23,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt /app/
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Pre-download SentenceTransformer embedding model into the image layer
+# Pre-download SentenceTransformer embedding model and CrossEncoder into the image layer
 # This ensures zero-latency cold starts and full offline execution
-RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
+RUN python -c "from sentence_transformers import SentenceTransformer, CrossEncoder; SentenceTransformer('intfloat/e5-small-v2'); CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')"
 
 # Copy application source code
 COPY backend/ /app/backend/

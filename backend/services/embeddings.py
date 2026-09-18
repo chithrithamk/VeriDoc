@@ -14,8 +14,8 @@ from sentence_transformers import SentenceTransformer
 from backend.services.chunker import DocumentChunk
 
 
-# Default lightweight embedding model (fast, local, and CPU-friendly)
-DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+# Default asymmetric embedding model (fast, local, and CPU-friendly)
+DEFAULT_EMBEDDING_MODEL = "intfloat/e5-small-v2"
 
 # Global cache for loaded model instances to prevent reloading overhead
 _MODEL_CACHE: Dict[str, SentenceTransformer] = {}
@@ -57,6 +57,21 @@ class EmbeddedChunk:
 # Model Management & Introspection
 # -----------------------------------------------------------------------------
 
+def _get_model_prefix(model_name: str, is_query: bool) -> str:
+    """
+    Returns the required prefix for asymmetric embedding models:
+    - E5 models ('intfloat/e5-*'): 'query: ' for questions, 'passage: ' for documents.
+    - BGE models ('BAAI/bge-*'): 'Represent this sentence for searching relevant passages: ' for queries.
+    - Symmetric models: '' (no prefix).
+    """
+    name_lower = model_name.lower()
+    if "e5" in name_lower:
+        return "query: " if is_query else "passage: "
+    elif "bge" in name_lower:
+        return "Represent this sentence for searching relevant passages: " if is_query else ""
+    return ""
+
+
 def load_embedding_model(model_name: str = DEFAULT_EMBEDDING_MODEL) -> SentenceTransformer:
     """
     Loads or retrieves a cached SentenceTransformer model instance.
@@ -74,7 +89,7 @@ def load_embedding_model(model_name: str = DEFAULT_EMBEDDING_MODEL) -> SentenceT
 
 def get_embedding_dimension(model_name: str = DEFAULT_EMBEDDING_MODEL) -> int:
     """
-    Returns the vector dimension produced by the specified model (e.g. 384 for all-MiniLM-L6-v2).
+    Returns the vector dimension produced by the specified model (e.g. 384 for e5-small-v2).
     """
     model = load_embedding_model(model_name)
     if hasattr(model, "get_embedding_dimension"):
@@ -92,6 +107,7 @@ def embed_text(
     text: str,
     model_name: str = DEFAULT_EMBEDDING_MODEL,
     normalize: bool = True,
+    is_query: bool = False,
 ) -> np.ndarray:
     """
     Generates a dense vector embedding for an individual text string.
@@ -100,6 +116,7 @@ def embed_text(
         text: Input string to embed.
         model_name: Model identifier to use.
         normalize: Whether to L2-normalize the output vector (default: True).
+        is_query: Whether the text is a search query (applies asymmetric query prefix).
 
     Returns:
         np.ndarray: 1D numerical embedding array (dtype float32).
@@ -117,7 +134,10 @@ def embed_text(
         dim = get_embedding_dimension(model_name)
         return np.zeros(dim, dtype=np.float32)
 
-    embedding = model.encode(text, normalize_embeddings=normalize, show_progress_bar=False)
+    prefix = _get_model_prefix(model_name, is_query=is_query)
+    prefixed_text = f"{prefix}{text}" if prefix else text
+
+    embedding = model.encode(prefixed_text, normalize_embeddings=normalize, show_progress_bar=False)
     return np.asarray(embedding, dtype=np.float32)
 
 
@@ -126,6 +146,7 @@ def embed_texts(
     model_name: str = DEFAULT_EMBEDDING_MODEL,
     normalize: bool = True,
     batch_size: int = 32,
+    is_query: bool = False,
 ) -> np.ndarray:
     """
     Generates dense vector embeddings for a list of text strings in batches.
@@ -135,6 +156,7 @@ def embed_texts(
         model_name: Model identifier to use.
         normalize: Whether to L2-normalize output vectors (default: True).
         batch_size: Batch size for model inference (default: 32).
+        is_query: Whether the texts are search queries (applies query prefix).
 
     Returns:
         np.ndarray: 2D numerical embedding matrix of shape (N, dimension).
@@ -150,8 +172,15 @@ def embed_texts(
         return np.empty((0, dim), dtype=np.float32)
 
     model = load_embedding_model(model_name)
+    prefix = _get_model_prefix(model_name, is_query=is_query)
+
+    if prefix:
+        prefixed_texts = [f"{prefix}{t}" if t.strip() else t for t in texts]
+    else:
+        prefixed_texts = texts
+
     embeddings = model.encode(
-        texts,
+        prefixed_texts,
         batch_size=batch_size,
         normalize_embeddings=normalize,
         show_progress_bar=False,
@@ -167,7 +196,8 @@ def embed_chunks(
 ) -> List[EmbeddedChunk]:
     """
     Generates embeddings for a list of DocumentChunks in a batch operation,
-    preserving metadata and strict 1-to-1 ordering.
+    preserving metadata and strict 1-to-1 ordering. Chunks are embedded with
+    passage prefixing.
 
     Args:
         chunks: List of DocumentChunk instances.
@@ -190,15 +220,16 @@ def embed_chunks(
     # Extract chunk texts preserving index sequence
     texts = [chunk.text for chunk in chunks]
 
-    # Batch encode texts
+    # Batch encode texts as passages (is_query=False)
     embeddings_matrix = embed_texts(
         texts,
         model_name=model_name,
         normalize=normalize,
         batch_size=batch_size,
+        is_query=False,
     )
 
-    # Attach embeddings back to chunk metadata
+    # Attach embeddings back to chunk metadata (preserving raw chunk.text for citations)
     embedded_chunks: List[EmbeddedChunk] = []
     for chunk, vector in zip(chunks, embeddings_matrix):
         embedded_chunk = EmbeddedChunk(

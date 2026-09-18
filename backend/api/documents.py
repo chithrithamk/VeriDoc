@@ -56,8 +56,8 @@ def get_pipeline() -> RAGPipeline:
 )
 async def upload_document(
     file: UploadFile = File(..., description="PDF document file to upload and index"),
-    chunk_size: int = Query(default=1000, ge=100, le=5000, description="Target character size per chunk"),
-    chunk_overlap: int = Query(default=200, ge=0, le=1000, description="Character overlap between chunks"),
+    chunk_size: int = Query(default=400, ge=100, le=5000, description="Target character size per chunk"),
+    chunk_overlap: int = Query(default=80, ge=0, le=1000, description="Character overlap between chunks"),
     pipeline: RAGPipeline = Depends(get_pipeline),
     db: Session = Depends(get_db),
 ) -> DocumentUploadResponse:
